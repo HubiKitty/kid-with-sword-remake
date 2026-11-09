@@ -38,3 +38,39 @@ workflows:
           xcrun --find metal || true
 
           echo "=== KONIEC TESTU ==="
+
+  zelda-tools:
+    name: Zelda - instalacja narzedzi
+    instance_type: mac_mini_m2
+    max_build_duration: 35
+
+    environment:
+      xcode: "27.2"
+
+    scripts:
+      - name: Kontrola SDK iOS
+        script: |
+          set -eux
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --find metal
+          git log -1 --oneline
+          df -h .
+
+      - name: Instalacja narzedzi
+        script: |
+          set -eux
+          brew install xcodegen glslang
+          brew install --cask dotnet-sdk
+          python3 -m venv /tmp/zelda-venv
+          /tmp/zelda-venv/bin/python -m pip install --upgrade pip
+          /tmp/zelda-venv/bin/python -m pip install --no-cache-dir lz4 "capstone>=5,<6" fonttools nsz "zbic==1.0.1.post1" backports.zstd zstandard
+
+      - name: Test narzedzi i skryptu
+        script: |
+          set -eux
+          xcodegen --version
+          dotnet --list-sdks
+          glslangValidator --version
+          /tmp/zelda-venv/bin/python -m pip show zbic
+          /tmp/zelda-venv/bin/python scripts/build_ipa_from_nsp.py --help
