@@ -127,6 +127,20 @@ workflows:
           uname -m
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
+          echo '=== Instalacja Metal Toolchain wymaganej przez Xcode 27.2 ==='
+          xcodebuild -downloadComponent MetalToolchain
+          xcrun --kill-cache || true
+          echo '=== Test kompilacji Metal dla iOS PRZED pobraniem 25 GB gry ==='
+          cat > "$CM_BUILD_DIR/zelda-metal-preflight.metal" <<'METAL_TEST'
+          #include <metal_stdlib>
+          using namespace metal;
+          kernel void zelda_preflight(device float* out [[buffer(0)]], uint id [[thread_position_in_grid]]) {
+            out[id] = 1.0f;
+          }
+          METAL_TEST
+          xcrun -sdk iphoneos metal -c "$CM_BUILD_DIR/zelda-metal-preflight.metal" -o "$CM_BUILD_DIR/zelda-metal-preflight.air"
+          test -s "$CM_BUILD_DIR/zelda-metal-preflight.air"
+          echo 'OK: Metal Toolchain faktycznie kompiluje shadery iOS.'
           python3 -c 'import sys; assert sys.version_info >= (3,12), sys.version'
           if ! command -v xcodegen >/dev/null 2>&1; then brew install xcodegen; fi
           if ! command -v glslangValidator >/dev/null 2>&1; then brew install glslang; fi
