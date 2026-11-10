@@ -74,3 +74,86 @@ workflows:
           glslangValidator --version
           /tmp/zelda-venv/bin/python -m pip show zbic
           /tmp/zelda-venv/bin/python scripts/build_ipa_from_nsp.py --help
+
+  zelda-iphone17pro:
+    name: Zelda Remake - iPhone 17 Pro
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+
+    environment:
+      xcode: "27.2"
+      groups:
+        - zelda_private
+
+    scripts:
+      - name: Instalacja narzedzi
+        script: |
+          set -euo pipefail
+          brew install xcodegen glslang
+          brew install --cask dotnet-sdk
+
+          python3 -m venv /tmp/zelda-venv
+          /tmp/zelda-venv/bin/python -m pip install --upgrade pip
+          /tmp/zelda-venv/bin/python -m pip install \
+            lz4 "capstone>=5,<6" fonttools nsz \
+            "zbic==1.0.1.post1" backports.zstd zstandard
+
+          if ! command -v node >/dev/null; then
+            brew install node
+          fi
+
+      - name: Pobieranie Zeldy
+        script: |
+          set -euo pipefail
+          : "${ZELDA_TRANSFER_LINK:?Brak linku SwissTransfer}"
+
+          mkdir -p "$CM_BUILD_DIR/zelda_input"
+
+          git clone --depth 1 \
+            https://github.com/tekru-labs/swish-dl.git \
+            /tmp/swish-dl
+
+          npm ci --prefix /tmp/swish-dl
+
+          node /tmp/swish-dl/index.js \
+            "$ZELDA_TRANSFER_LINK" \
+            -o "$CM_BUILD_DIR/zelda_input"
+
+          NUP=$(find "$CM_BUILD_DIR/zelda_input" \
+            -maxdepth 1 -type f -iname '*.nup' -print -quit)
+
+          test -n "$NUP"
+          test "$(stat -f%z "$NUP")" -eq 25622267860
+          echo "Plik NUP pobrany poprawnie."
+
+      - name: Kompilacja Zelda iOS
+        script: |
+          set -euo pipefail
+          NUP=$(find "$CM_BUILD_DIR/zelda_input" \
+            -maxdepth 1 -type f -iname '*.nup' -print -quit)
+
+          mkdir -p "$CM_BUILD_DIR/zelda_out"
+
+          printf 'DM_UPSCALER=metalfx\n' \
+            > "$CM_BUILD_DIR/ios_env.txt"
+
+          /tmp/zelda-venv/bin/python \
+            scripts/build_ipa_from_nsp.py "$NUP" \
+            --platform ios \
+            --romfs separate \
+            --gpu none \
+            --keep-extracted \
+            --work-dir "$CM_BUILD_DIR/zelda_work" \
+            --env-file "$CM_BUILD_DIR/ios_env.txt" \
+            --out "$CM_BUILD_DIR/zelda_out/OcarinaOfTime-iPhone17Pro.ipa" \
+            --progress lines
+
+      - name: Sprawdzenie wynikow
+        script: |
+          ls -lh "$CM_BUILD_DIR/zelda_out"
+          ls -lh "$CM_BUILD_DIR/zelda_work/extract/v131072/RomFS.img"
+
+    artifacts:
+      - zelda_out/*.ipa
+      - zelda_work/extract/v131072/RomFS.img
+      - zelda_work/logs/*.log
