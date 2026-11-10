@@ -113,7 +113,7 @@ workflows:
             https://github.com/tekru-labs/swish-dl.git \
             /tmp/swish-dl
 
-          npm ci --prefix /tmp/swish-dl
+          npm install --prefix /tmp/swish-dl --no-audit --no-fund
 
           node /tmp/swish-dl/index.js \
             "$ZELDA_TRANSFER_LINK" \
