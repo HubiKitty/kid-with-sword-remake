@@ -76,65 +76,137 @@ workflows:
           /tmp/zelda-venv/bin/python scripts/build_ipa_from_nsp.py --help
 
   zelda-iphone17pro:
-    name: Zelda Remake - iPhone 17 Pro (VNC)
+    name: Zelda Remake - iPhone 17 Pro (PRIVATE GITHUB - POPRAWIONY)
     instance_type: mac_mini_m2
     max_build_duration: 120
 
     environment:
       xcode: "27.2"
+      groups:
+        - zelda_private
 
     scripts:
-      - name: Instalacja narzedzi
+      - name: Kontrola GitHub i kompletnego wydania (bez pobierania GB)
         script: |
           set -euo pipefail
-          brew install xcodegen glslang
-          brew install --cask dotnet-sdk
+          : "${GH_TOKEN:?Brak GH_TOKEN w grupie zelda_private}"
+          cd "$CM_BUILD_DIR"
+          command -v gh >/dev/null 2>&1 || { echo 'Brak GitHub CLI na maszynie'; exit 1; }
+          command -v python3 >/dev/null 2>&1 || { echo 'Brak Python3'; exit 1; }
+          echo 'Sprawdzam dostep fine-grained tokenu do prywatnego repozytorium...'
+          PRIVATE=$(gh repo view HubiKitty/zelda-private-transfer --json isPrivate --jq .isPrivate)
+          if [ "$PRIVATE" != 'true' ]; then
+            echo 'BLAD: repo nie jest prywatne albo odczyt nie udal sie'; exit 1
+          fi
+          gh release view zelda-v131072-data -R HubiKitty/zelda-private-transfer \
+            --json assets > "$CM_BUILD_DIR/zelda-release-assets.json"
+          python3 - "$CM_BUILD_DIR/zelda-release-assets.json" <<'PYCODE'
+          import json, sys
+          items=json.load(open(sys.argv[1], encoding='utf-8'))['assets']
+          sizes={a['name']:int(a['size']) for a in items}
+          expected={f'Zelda.part.{i:03d}': (1992294400 if i<12 else 1714735060) for i in range(13)}
+          expected['zelda.nup.sha256']=65
+          problems=[f'{name}: mam {sizes.get(name)}, wymagane {size}' for name,size in expected.items() if sizes.get(name)!=size]
+          if problems:
+              sys.exit('BRAKUJE PLIKOW LUB ROZMIAR NIESPODZIEWANY:\n'+'\n'.join(problems))
+          print('OK: 13 czesci (25 622 267 860 bajtow) i SHA-256 dostepne.')
+          PYCODE
+          echo 'Weryfikuję dysk przed pobieraniem i kompilacja.'
+          FREE_KIB=$(df -Pk "$CM_BUILD_DIR" | awk 'END {print $4}')
+          # 80 GiB przestrzeni na NUP, ekstrakcje, RomFS i kompilacje.
+          if [ "$FREE_KIB" -lt 83886080 ]; then
+            echo "BLAD: mniej niz 80 GiB wolnego miejsca: ${FREE_KIB} KiB"; exit 1
+          fi
+          df -h "$CM_BUILD_DIR"
+          echo 'OK: dostep, rozmiary i miejsce na dysku.'
+
+      - name: Instalacja i kontrola narzedzi
+        script: |
+          set -euo pipefail
+          echo 'Sprawdzam Xcode, Python i platforme...'
+          uname -m
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          python3 -c 'import sys; assert sys.version_info >= (3,12), sys.version'
+          if ! command -v xcodegen >/dev/null 2>&1; then brew install xcodegen; fi
+          if ! command -v glslangValidator >/dev/null 2>&1; then brew install glslang; fi
+          if ! command -v dotnet >/dev/null 2>&1; then brew install --cask dotnet-sdk; fi
+          if ! dotnet --list-sdks | grep -Eq '^10\.'; then
+            echo 'Brak SDK .NET 10; sprawdzam instalacje przez Homebrew...'
+            brew install --cask dotnet-sdk || true
+            dotnet --list-sdks | grep -Eq '^10\.' || { echo 'BLAD: wymagany .NET SDK 10'; exit 1; }
+          fi
           python3 -m venv /tmp/zelda-venv
           /tmp/zelda-venv/bin/python -m pip install --upgrade pip
           /tmp/zelda-venv/bin/python -m pip install --no-cache-dir \
-            lz4 "capstone>=5,<6" fonttools nsz \
-            "zbic==1.0.1.post1" backports.zstd zstandard
+            lz4 'capstone>=5,<6' fonttools nsz 'zbic==1.0.1.post1' backports.zstd zstandard
+          /tmp/zelda-venv/bin/python scripts/build_ipa_from_nsp.py --help >/dev/null
+          echo 'OK: wszystkie narzedzia sa gotowe.'
 
-      - name: Pobierz NUP w Safari przez VNC
+      - name: Pobieranie 13 czesci z ponawianiem i SHA-256
         script: |
-          set -eu
-          mkdir -p "$HOME/Downloads" "$CM_BUILD_DIR/zelda_input"
-          echo "OTWORZ VNC: na Macu w Safari otworz SWOJ link SwissTransfer."
-          echo "Wybierz pojedynczy plik NUP, NIE opcje Download all (ZIP)."
-          echo "Zapisz plik do /Users/builder/Downloads."
-          echo "Nie wklejaj linku do publicznych logow ani repozytorium."
-
-          i=0
-          while [ "$i" -lt 240 ]; do
-            for p in "$HOME/Downloads"/*.nup "$CM_BUILD_DIR/zelda_input"/*.nup; do
-              [ -f "$p" ] || continue
-              bytes=$(stat -f%z "$p" 2>/dev/null || echo 0)
-              if [ "$bytes" = "25622267860" ]; then
-                printf '%s\n' "$p" > "$CM_BUILD_DIR/zelda-input-path.txt"
-                echo "NUP OK - znaleziono kompletny plik o odpowiednim rozmiarze."
-                exit 0
+          set -euo pipefail
+          : "${GH_TOKEN:?Brak GH_TOKEN}"
+          REPO='HubiKitty/zelda-private-transfer'
+          TAG='zelda-v131072-data'
+          INPUT="$CM_BUILD_DIR/zelda_input"
+          PART_DIR="$INPUT/parts"
+          mkdir -p "$PART_DIR"
+          NUP="$INPUT/Zelda-OcarinaOfTime-v131072.nup"
+          : > "$NUP"
+          EXPECTED_TOTAL=25622267860
+          for i in $(seq 0 12); do
+            NAME=$(printf 'Zelda.part.%03d' "$i")
+            if [ "$i" -lt 12 ]; then EXPECTED_PART=1992294400; else EXPECTED_PART=1714735060; fi
+            ATTEMPT=0
+            while :; do
+              ATTEMPT=$((ATTEMPT + 1))
+              rm -f "$PART_DIR/$NAME"
+              echo "Pobieram $NAME ($((i+1))/13), proba $ATTEMPT/5..."
+              if gh release download "$TAG" -R "$REPO" \
+                  --pattern "$NAME" --dir "$PART_DIR" --clobber; then
+                if [ -f "$PART_DIR/$NAME" ]; then
+                  HAVE=$(stat -f%z "$PART_DIR/$NAME")
+                  if [ "$HAVE" -eq "$EXPECTED_PART" ]; then break; fi
+                  echo "BLAD ROZMIARU: $NAME ma $HAVE bajtow, oczekiwano $EXPECTED_PART"
+                fi
               fi
+              if [ "$ATTEMPT" -ge 5 ]; then
+                echo "BLAD: 5 prob nie wystarczylo, nie lacze niekompletnej czesci $NAME"; exit 1
+              fi
+              sleep "$((ATTEMPT * 10))"
             done
-            i=$((i+1))
-            if [ $((i % 6)) -eq 0 ]; then
-              echo "Czekam na zakonczenie pobierania... ${i}0 sekund."
-            fi
-            sleep 10
+            cat "$PART_DIR/$NAME" >> "$NUP"
+            rm -f "$PART_DIR/$NAME"
+            HAVE_TOTAL=$(stat -f%z "$NUP")
+            echo "Zlozono $((i+1))/13: $HAVE_TOTAL / $EXPECTED_TOTAL bajtow."
           done
-          echo "BLAD: plik NUP nie zostal pobrany w ciagu 40 minut."
-          exit 1
+          TOTAL=$(stat -f%z "$NUP")
+          [ "$TOTAL" -eq "$EXPECTED_TOTAL" ] || { echo "BLAD: NUP ma $TOTAL bajtow"; exit 1; }
+          gh release download "$TAG" -R "$REPO" \
+            --pattern 'zelda.nup.sha256' --dir "$INPUT" --clobber
+          EXPECTED_HASH=$(tr -d '\r\n[:space:]' < "$INPUT/zelda.nup.sha256" | tr '[:upper:]' '[:lower:]')
+          if ! printf '%s' "$EXPECTED_HASH" | grep -Eq '^[a-f0-9]{64}$'; then
+            echo 'BLAD: plik .sha256 nie ma prawidlowej zawartosci'; exit 1
+          fi
+          echo 'Sprawdzam SHA-256 kompletnego NUP...'
+          ACTUAL_HASH=$(shasum -a 256 "$NUP" | awk '{print $1}')
+          if [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then
+            echo 'BLAD: suma SHA-256 NUP jest niezgodna'; exit 1
+          fi
+          printf '%s\n' "$NUP" > "$CM_BUILD_DIR/zelda-input-path.txt"
+          echo 'OK: NUP jest kompletny, ma prawidlowy rozmiar i SHA-256.'
 
-      - name: Kompilacja Zelda iOS
+      - name: Kompilacja Zelda iOS v131072
         script: |
           set -euo pipefail
           NUP=$(cat "$CM_BUILD_DIR/zelda-input-path.txt")
-          test -f "$NUP"
+          test -s "$NUP"
           mkdir -p "$CM_BUILD_DIR/zelda_out"
-
           printf 'DM_UPSCALER=metalfx\n' > "$CM_BUILD_DIR/ios_env.txt"
-          /tmp/zelda-venv/bin/python \
-            scripts/build_ipa_from_nsp.py "$NUP" \
+          /tmp/zelda-venv/bin/python scripts/build_ipa_from_nsp.py "$NUP" \
             --platform ios \
+            --package v131072 \
             --romfs separate \
             --gpu none \
             --keep-extracted \
@@ -143,14 +215,15 @@ workflows:
             --out "$CM_BUILD_DIR/zelda_out/OcarinaOfTime-iPhone17Pro.ipa" \
             --progress lines
 
-      - name: Sprawdzenie wyniku
+      - name: Weryfikacja IPA
         script: |
-          set -e
-          ls -lh "$CM_BUILD_DIR/zelda_out"
-          test -s "$CM_BUILD_DIR/zelda_out/OcarinaOfTime-iPhone17Pro.ipa"
-          ls -lh "$CM_BUILD_DIR/zelda_work/extract/v131072/RomFS.img"
-          echo "UWAGA: RomFS.img przygotujemy oddzielnie na Windowsie."
-          echo "Nie ma go w artefaktach, aby uniknac problemow z plikiem ok. 26 GB."
+          set -euo pipefail
+          IPA="$CM_BUILD_DIR/zelda_out/OcarinaOfTime-iPhone17Pro.ipa"
+          test -s "$IPA" || { echo 'BLAD: kompilacja nie utworzyla IPA'; exit 1; }
+          unzip -tq "$IPA" >/dev/null || { echo 'BLAD: IPA nie przechodzi kontroli ZIP'; exit 1; }
+          echo 'IPA istnieje i ma poprawna strukture ZIP.'
+          ls -lh "$IPA"
+          echo 'RomFS.img jest juz przygotowany lokalnie na Windowsie.'
 
     artifacts:
       - zelda_out/*.ipa
