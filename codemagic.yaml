@@ -76,14 +76,12 @@ workflows:
           /tmp/zelda-venv/bin/python scripts/build_ipa_from_nsp.py --help
 
   zelda-iphone17pro:
-    name: Zelda Remake - iPhone 17 Pro
+    name: Zelda Remake - iPhone 17 Pro (VNC)
     instance_type: mac_mini_m2
     max_build_duration: 120
 
     environment:
       xcode: "27.2"
-      groups:
-        - zelda_private
 
     scripts:
       - name: Instalacja narzedzi
@@ -91,52 +89,49 @@ workflows:
           set -euo pipefail
           brew install xcodegen glslang
           brew install --cask dotnet-sdk
-
           python3 -m venv /tmp/zelda-venv
           /tmp/zelda-venv/bin/python -m pip install --upgrade pip
-          /tmp/zelda-venv/bin/python -m pip install \
+          /tmp/zelda-venv/bin/python -m pip install --no-cache-dir \
             lz4 "capstone>=5,<6" fonttools nsz \
             "zbic==1.0.1.post1" backports.zstd zstandard
 
-          if ! command -v node >/dev/null; then
-            brew install node
-          fi
-
-      - name: Pobieranie Zeldy
+      - name: Pobierz NUP w Safari przez VNC
         script: |
-          set -euo pipefail
-          : "${ZELDA_TRANSFER_LINK:?Brak linku SwissTransfer}"
+          set -eu
+          mkdir -p "$HOME/Downloads" "$CM_BUILD_DIR/zelda_input"
+          echo "OTWORZ VNC: na Macu w Safari otworz SWOJ link SwissTransfer."
+          echo "Wybierz pojedynczy plik NUP, NIE opcje Download all (ZIP)."
+          echo "Zapisz plik do /Users/builder/Downloads."
+          echo "Nie wklejaj linku do publicznych logow ani repozytorium."
 
-          mkdir -p "$CM_BUILD_DIR/zelda_input"
-
-          git clone --depth 1 \
-            https://github.com/tekru-labs/swish-dl.git \
-            /tmp/swish-dl
-
-          npm install --prefix /tmp/swish-dl --no-audit --no-fund
-
-          node /tmp/swish-dl/index.js \
-            "$ZELDA_TRANSFER_LINK" \
-            -o "$CM_BUILD_DIR/zelda_input"
-
-          NUP=$(find "$CM_BUILD_DIR/zelda_input" \
-            -maxdepth 1 -type f -iname '*.nup' -print -quit)
-
-          test -n "$NUP"
-          test "$(stat -f%z "$NUP")" -eq 25622267860
-          echo "Plik NUP pobrany poprawnie."
+          i=0
+          while [ "$i" -lt 240 ]; do
+            for p in "$HOME/Downloads"/*.nup "$CM_BUILD_DIR/zelda_input"/*.nup; do
+              [ -f "$p" ] || continue
+              bytes=$(stat -f%z "$p" 2>/dev/null || echo 0)
+              if [ "$bytes" = "25622267860" ]; then
+                printf '%s\n' "$p" > "$CM_BUILD_DIR/zelda-input-path.txt"
+                echo "NUP OK - znaleziono kompletny plik o odpowiednim rozmiarze."
+                exit 0
+              fi
+            done
+            i=$((i+1))
+            if [ $((i % 6)) -eq 0 ]; then
+              echo "Czekam na zakonczenie pobierania... ${i}0 sekund."
+            fi
+            sleep 10
+          done
+          echo "BLAD: plik NUP nie zostal pobrany w ciagu 40 minut."
+          exit 1
 
       - name: Kompilacja Zelda iOS
         script: |
           set -euo pipefail
-          NUP=$(find "$CM_BUILD_DIR/zelda_input" \
-            -maxdepth 1 -type f -iname '*.nup' -print -quit)
-
+          NUP=$(cat "$CM_BUILD_DIR/zelda-input-path.txt")
+          test -f "$NUP"
           mkdir -p "$CM_BUILD_DIR/zelda_out"
 
-          printf 'DM_UPSCALER=metalfx\n' \
-            > "$CM_BUILD_DIR/ios_env.txt"
-
+          printf 'DM_UPSCALER=metalfx\n' > "$CM_BUILD_DIR/ios_env.txt"
           /tmp/zelda-venv/bin/python \
             scripts/build_ipa_from_nsp.py "$NUP" \
             --platform ios \
@@ -148,12 +143,15 @@ workflows:
             --out "$CM_BUILD_DIR/zelda_out/OcarinaOfTime-iPhone17Pro.ipa" \
             --progress lines
 
-      - name: Sprawdzenie wynikow
+      - name: Sprawdzenie wyniku
         script: |
+          set -e
           ls -lh "$CM_BUILD_DIR/zelda_out"
+          test -s "$CM_BUILD_DIR/zelda_out/OcarinaOfTime-iPhone17Pro.ipa"
           ls -lh "$CM_BUILD_DIR/zelda_work/extract/v131072/RomFS.img"
+          echo "UWAGA: RomFS.img przygotujemy oddzielnie na Windowsie."
+          echo "Nie ma go w artefaktach, aby uniknac problemow z plikiem ok. 26 GB."
 
     artifacts:
       - zelda_out/*.ipa
-      - zelda_work/extract/v131072/RomFS.img
       - zelda_work/logs/*.log
